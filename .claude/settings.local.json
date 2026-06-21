@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(echo \"=== .env.example ===\" && cat .env.example && echo \"\" && echo \"=== package.json ===\" && cat package.json && echo \"\" && echo \"=== .env keys \\(names only\\) ===\" && sed -E 's/=.*/=***/' .env)",
+      "Read(//Users/mohitchaudhary/**)",
+      "Bash(python3 -c ' *)",
+      "Bash(node --check server/services/foodAnalyzer.js)",
+      "Bash(node --check server/models/FoodScan.js)",
+      "Bash(node --check server/routes/foodRoutes.js)",
+      "Bash(node --check server/index.js)",
+      "Bash(node --check server/routes/dayRoutes.js)",
+      "Bash(npm run *)",
+      "Bash(node server/index.js)",
+      "Bash(curl -s http://localhost:4000/health)",
+      "Read(//tmp/**)",
+      "Bash(pkill -f \"node server/index.js\")",
+      "Bash(gh auth *)",
+      "Bash(git --version)",
+      "Bash(git config *)",
+      "Bash(git init *)",
+      "Bash(git add *)"
+    ],
+    "additionalDirectories": [
+      "/Users/mohitchaudhary/Desktop/Agent/CaloriesCalculator"
+    ]
+  }
+}
