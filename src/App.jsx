@@ -1,7 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { analyzeDay } from "./coachShared.js";
+import SmartNotifications from "./SmartNotifications.jsx";
+import Suggestions from "./Suggestions.jsx";
+import NutritionOverview from "./NutritionOverview.jsx";
+import AICoach from "./AICoach.jsx";
+import FoodRecommendation from "./FoodRecommendation.jsx";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:4000";
-const emptyEntry = { label: "", calories: "" };
+const emptyEntry = { label: "", calories: "", protein: "", carbs: "", fat: "", fiber: "", sugar: "", waterMl: "" };
 const emptyBurnedEntry = {
   label: "",
   entryMode: "manual",
@@ -39,6 +45,7 @@ function createEmptyDay(date = todayString()) {
     date,
     manualConsumedTotal: "",
     manualBurnedTotal: "",
+    manualWaterMl: "",
     bodyWeight: "",
     height: "",
     consumedEntries: [{ ...emptyEntry }],
@@ -53,6 +60,13 @@ function sumEntries(entries) {
   }, 0);
 }
 
+function sumWaterMl(entries) {
+  return entries.reduce((total, entry) => {
+    const value = Number(entry.waterMl);
+    return total + (Number.isFinite(value) ? value : 0);
+  }, 0);
+}
+
 function sanitizeEntries(entries) {
   return entries
     .filter((entry) => entry.label.trim() || entry.calories !== "")
@@ -62,6 +76,9 @@ function sanitizeEntries(entries) {
       protein: Number(entry.protein || 0),
       carbs: Number(entry.carbs || 0),
       fat: Number(entry.fat || 0),
+      fiber: Number(entry.fiber || 0),
+      sugar: Number(entry.sugar || 0),
+      waterMl: Number(entry.waterMl || 0),
       source: entry.source === "scan" ? "scan" : "manual"
     }));
 }
@@ -177,7 +194,7 @@ function Field({ label, ...props }) {
   );
 }
 
-function EntryList({ title, entries, onChange, onAdd, onRemove }) {
+function EntryList({ title, entries, onChange, onAdd, onRemove, onAskAI, estimatingIndex }) {
   return (
     <section className="panel entry-panel">
       <div className="panel-header">
@@ -190,6 +207,15 @@ function EntryList({ title, entries, onChange, onAdd, onRemove }) {
         </button>
       </div>
       <div className="entry-list">
+        {entries.length > 0 && (
+          <div className="entry-row entry-row--header">
+            <span>Label</span>
+            <span>Calories (kcal)</span>
+            <span>Protein (g)</span>
+            <span>Fiber (g)</span>
+            <span />
+          </div>
+        )}
         {entries.map((entry, index) => (
           <div className="entry-row" key={`${title}-${index}`}>
             <input
@@ -201,18 +227,43 @@ function EntryList({ title, entries, onChange, onAdd, onRemove }) {
             <input
               type="number"
               min="0"
-              placeholder="Calories"
+              placeholder="Cal (kcal)"
               value={entry.calories}
               onChange={(event) => onChange(index, "calories", event.target.value)}
             />
-            <button
-              type="button"
-              className="remove-button"
-              onClick={() => onRemove(index)}
-              disabled={entries.length === 1}
-            >
-              Remove
-            </button>
+            <input
+              type="number"
+              min="0"
+              placeholder="Protein (g)"
+              value={entry.protein}
+              onChange={(event) => onChange(index, "protein", event.target.value)}
+            />
+            <input
+              type="number"
+              min="0"
+              placeholder="Fiber (g)"
+              value={entry.fiber}
+              onChange={(event) => onChange(index, "fiber", event.target.value)}
+            />
+            <div className="entry-ai-wrap">
+              {onAskAI ? (
+                <button
+                  type="button"
+                  className="ai-estimate-btn"
+                  onClick={() => onAskAI(index)}
+                  disabled={estimatingIndex === index || !entry.label.trim()}
+                  title="Estimate calories with AI"
+                >
+                  {estimatingIndex === index ? (
+                    <span className="mini-spinner" />
+                  ) : (
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 2l2.4 7.2L21 12l-6.6 2.8L12 22l-2.4-7.2L3 12l6.6-2.8z" />
+                    </svg>
+                  )}
+                </button>
+              ) : null}
+            </div>
           </div>
         ))}
       </div>
@@ -220,7 +271,49 @@ function EntryList({ title, entries, onChange, onAdd, onRemove }) {
   );
 }
 
-function ExerciseEntryList({ entries, bodyWeight, height, onChange, onAdd, onRemove }) {
+function ExerciseEntrySummary({ entry, onExpand, onRemove, disabled }) {
+  const modeLabel =
+    entry.entryMode === "cardio"
+      ? entry.exerciseType?.replace("_", " ")
+      : entry.entryMode === "strength"
+        ? entry.exerciseType?.replace("_", " ")
+        : "Manual";
+  const calories = entry.entryMode === "manual"
+    ? entry.calories
+    : entry.predictedCalories || entry.calories;
+
+  return (
+    <div className="exercise-summary">
+      <div className="exercise-summary__info">
+        <span className="exercise-summary__label">{entry.label || "Exercise"}</span>
+        <span className="exercise-summary__type">{modeLabel}</span>
+      </div>
+      <div className="exercise-summary__cal">
+        <strong>{calories}</strong>
+        <small>kcal</small>
+      </div>
+      <div className="exercise-summary__actions">
+        <button
+          type="button"
+          className="ghost-button exercise-summary__edit-btn"
+          onClick={onExpand}
+        >
+          Edit
+        </button>
+        <button
+          type="button"
+          className="remove-button exercise-summary__remove-btn"
+          onClick={onRemove}
+          disabled={disabled}
+        >
+          Remove
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ExerciseEntryList({ entries, bodyWeight, height, onChange, onAdd, onRemove, expandedIndices, onExpand }) {
   return (
     <section className="panel entry-panel">
       <div className="panel-header">
@@ -235,9 +328,22 @@ function ExerciseEntryList({ entries, bodyWeight, height, onChange, onAdd, onRem
       <div className="entry-list">
         {entries.map((entry, index) => {
           const predictedCalories = getPredictedCalories(entry, bodyWeight, height);
+          const isExpanded = expandedIndices.includes(index);
           const isManual = entry.entryMode === "manual";
           const isCardio = entry.entryMode === "cardio";
           const typeOptions = isCardio ? cardioExerciseOptions : strengthExerciseOptions;
+
+          if (!isExpanded) {
+            return (
+              <ExerciseEntrySummary
+                key={`exercise-${index}`}
+                entry={{ ...entry, predictedCalories }}
+                onExpand={() => onExpand(index)}
+                onRemove={() => onRemove(index)}
+                disabled={entries.length === 1}
+              />
+            );
+          }
 
           return (
             <div className="exercise-card" key={`exercise-${index}`}>
@@ -461,16 +567,57 @@ function App() {
   const [consuming, setConsuming] = useState(false);
   const [scanError, setScanError] = useState("");
   const [scanMessage, setScanMessage] = useState("");
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [estimatingEntry, setEstimatingEntry] = useState(null);
+  const [savedConsumed, setSavedConsumed] = useState(0);
+  const [savedBurned, setSavedBurned] = useState(0);
+  const [savedWater, setSavedWater] = useState(0);
+  const [expandedBurnEntries, setExpandedBurnEntries] = useState([]);
+  const [customWaterMl, setCustomWaterMl] = useState("");
+  const [userDiet, setUserDiet] = useState(() => localStorage.getItem("calories-diet") || "vegetarian");
+  const [page, setPage] = useState(() => {
+    const hash = window.location.hash.slice(1);
+    if (hash === "dashboard") return "dashboard";
+    if (hash === "coach") return "coach";
+    if (hash === "recommend") return "recommend";
+    return "nutrition";
+  });
+  const fileInputRef = useRef(null);
 
-  const consumedTotal = useMemo(
-    () => totalFor(day.manualConsumedTotal, day.consumedEntries),
-    [day.manualConsumedTotal, day.consumedEntries]
+  useEffect(() => {
+    function onHashChange() {
+      const hash = window.location.hash.slice(1);
+      if (hash === "dashboard") setPage("dashboard");
+      else if (hash === "coach") setPage("coach");
+      else if (hash === "recommend") setPage("recommend");
+      else setPage("nutrition");
+    }
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  const analysis = useMemo(
+    () => analyzeDay(day.consumedEntries, day.burnedEntries, day.manualWaterMl, savedConsumed, savedBurned),
+    [day.consumedEntries, day.burnedEntries, day.manualWaterMl, savedConsumed, savedBurned]
   );
-  const burnedTotal = useMemo(
-    () => totalBurnedFor(day.manualBurnedTotal, day.burnedEntries, day.bodyWeight, day.height),
-    [day.manualBurnedTotal, day.burnedEntries, day.bodyWeight, day.height]
-  );
-  const netCalories = consumedTotal - burnedTotal;
+
+  function goToNutrition() {
+    window.location.hash = "";
+  }
+
+  function goToDashboard() {
+    window.location.hash = "dashboard";
+  }
+
+  function goToCoach() {
+    window.location.hash = "coach";
+  }
+
+  function goToRecommend() {
+    window.location.hash = "recommend";
+  }
+
+  const netCalories = savedConsumed - savedBurned;
 
   useEffect(() => {
     if (!token) {
@@ -500,6 +647,7 @@ function App() {
             date: payload.date,
             manualConsumedTotal: String(payload.manualConsumedTotal ?? ""),
             manualBurnedTotal: String(payload.manualBurnedTotal ?? ""),
+            manualWaterMl: String(payload.manualWaterMl ?? ""),
             bodyWeight: String(payload.bodyWeight ?? ""),
             height: String(payload.height ?? ""),
             consumedEntries: payload.consumedEntries.length ? payload.consumedEntries : [{ ...emptyEntry }],
@@ -507,6 +655,16 @@ function App() {
               ? payload.burnedEntries.map(normalizeBurnedEntry)
               : [{ ...emptyBurnedEntry }]
           });
+          setSavedConsumed(
+            totalFor(payload.manualConsumedTotal, payload.consumedEntries)
+          );
+          setSavedBurned(
+            totalBurnedFor(payload.manualBurnedTotal, payload.burnedEntries, payload.bodyWeight, payload.height)
+          );
+          setSavedWater(
+            Number(payload.manualWaterMl || 0) + sumWaterMl(payload.consumedEntries)
+          );
+          setExpandedBurnEntries([]);
         }
       } catch (fetchError) {
         if (!cancelled) {
@@ -603,16 +761,32 @@ function App() {
   }
 
   function addEntry(type) {
+    if (type === "burned") {
+      setExpandedBurnEntries((prev) => [0, ...prev.map((i) => i + 1)]);
+      setDay((currentDay) => {
+        return {
+          ...currentDay,
+          burnedEntries: [{ ...emptyBurnedEntry }, ...currentDay.burnedEntries]
+        };
+      });
+      return;
+    }
     setDay((currentDay) => {
-      const key = type === "consumed" ? "consumedEntries" : "burnedEntries";
       return {
         ...currentDay,
-        [key]: [...currentDay[key], type === "consumed" ? { ...emptyEntry } : { ...emptyBurnedEntry }]
+        consumedEntries: [...currentDay.consumedEntries, { ...emptyEntry }]
       };
     });
   }
 
   function removeEntry(type, index) {
+    if (type === "burned") {
+      setExpandedBurnEntries((prev) =>
+        prev
+          .filter((i) => i !== index)
+          .map((i) => (i > index ? i - 1 : i))
+      );
+    }
     setDay((currentDay) => {
       const key = type === "consumed" ? "consumedEntries" : "burnedEntries";
       const nextEntries = currentDay[key].filter((_, entryIndex) => entryIndex !== index);
@@ -631,6 +805,40 @@ function App() {
       reader.onerror = () => reject(new Error("Could not read the image file."));
       reader.readAsDataURL(file);
     });
+  }
+
+  const handleDragOver = useCallback((event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragOver(false);
+  }, []);
+
+  const handleDrop = useCallback((event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragOver(false);
+
+    const file = event.dataTransfer?.files?.[0];
+    if (!file || !file.type.startsWith("image/")) {
+      setScanError("Please drop a valid image file.");
+      return;
+    }
+
+    setScanError("");
+    setScanMessage("");
+    setScanResult(null);
+
+    readFileAsDataUrl(file).then(setScanImage).catch((err) => setScanError(err.message));
+  }, []);
+
+  function handleDropZoneClick() {
+    fileInputRef.current?.click();
   }
 
   async function handleImageSelect(event) {
@@ -688,6 +896,64 @@ function App() {
     }
   }
 
+  async function handleAskAI(index) {
+    const label = day.consumedEntries[index]?.label?.trim();
+    if (!label) {
+      return;
+    }
+
+    setEstimatingEntry(index);
+    setError("");
+    setMessage("");
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/food/estimate-by-name`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ dishName: label })
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.message || "Could not estimate calories.");
+      }
+
+      const avgCalories = Math.round((payload.totalCaloriesMin + payload.totalCaloriesMax) / 2);
+
+      setDay((currentDay) => {
+        const nextEntries = currentDay.consumedEntries.map((entry, entryIndex) => {
+          if (entryIndex !== index) {
+            return entry;
+          }
+          return {
+            ...entry,
+            calories: avgCalories,
+            protein: payload.protein,
+            carbs: payload.carbs,
+            fat: payload.fat,
+            fiber: payload.fiber,
+            sugar: payload.sugar,
+            waterMl: payload.waterMl
+          };
+        });
+        return { ...currentDay, consumedEntries: nextEntries };
+      });
+
+      if (payload.estimateSource === "fallback") {
+        setMessage("Sample estimate shown (no AI key configured).");
+      } else {
+        setMessage(`Estimated ~${avgCalories} kcal for "${label}".`);
+      }
+    } catch (estimateError) {
+      setError(estimateError.message);
+    } finally {
+      setEstimatingEntry(null);
+    }
+  }
+
   async function handleConsumeScan() {
     if (!scanResult) {
       return;
@@ -721,6 +987,9 @@ function App() {
         protein: scanResult.protein,
         carbs: scanResult.carbs,
         fat: scanResult.fat,
+        fiber: scanResult.fiber,
+        sugar: scanResult.sugar,
+        waterMl: scanResult.waterMl,
         source: "scan"
       };
 
@@ -774,6 +1043,7 @@ function App() {
       localStorage.setItem("calories-user-name", payload.user.name);
       setToken(payload.token);
       setUserName(payload.user.name);
+      window.location.hash = "";
       setMessage(mode === "signup" ? "Account created." : "Welcome back.");
     } catch (authError) {
       setError(authError.message);
@@ -797,6 +1067,7 @@ function App() {
         body: JSON.stringify({
           manualConsumedTotal: Number(day.manualConsumedTotal || 0),
           manualBurnedTotal: Number(day.manualBurnedTotal || 0),
+          manualWaterMl: Number(day.manualWaterMl || 0),
           bodyWeight: Number(day.bodyWeight || 0),
           height: Number(day.height || 0),
           consumedEntries: sanitizeEntries(day.consumedEntries),
@@ -814,6 +1085,7 @@ function App() {
         date: payload.day.date,
         manualConsumedTotal: String(payload.day.manualConsumedTotal ?? ""),
         manualBurnedTotal: String(payload.day.manualBurnedTotal ?? ""),
+        manualWaterMl: String(payload.day.manualWaterMl ?? ""),
         bodyWeight: String(payload.day.bodyWeight ?? ""),
         height: String(payload.day.height ?? ""),
         consumedEntries: payload.day.consumedEntries.length ? payload.day.consumedEntries : [{ ...emptyEntry }],
@@ -821,6 +1093,16 @@ function App() {
           ? payload.day.burnedEntries.map(normalizeBurnedEntry)
           : [{ ...emptyBurnedEntry }]
       });
+      setSavedConsumed(
+        totalFor(payload.day.manualConsumedTotal, payload.day.consumedEntries)
+      );
+      setSavedBurned(
+        totalBurnedFor(payload.day.manualBurnedTotal, payload.day.burnedEntries, payload.day.bodyWeight, payload.day.height)
+      );
+      setSavedWater(
+        Number(payload.day.manualWaterMl || 0) + sumWaterMl(payload.day.consumedEntries)
+      );
+      setExpandedBurnEntries([]);
     } catch (saveError) {
       setError(saveError.message);
     } finally {
@@ -907,253 +1189,620 @@ function App() {
     );
   }
 
-  return (
-    <main className="shell dashboard-shell">
-      <section className="hero-card wide">
-        <div className="hero-topline">
-          <div>
-            <p className="eyebrow">Daily Dashboard</p>
-            <h1>Welcome, {userName}.</h1>
+  if (page === "dashboard") {
+    return (
+      <main className="shell dashboard-shell">
+        <nav className="app-nav">
+          <span className="app-nav__title">CaloriesTracker</span>
+          <div className="app-nav__links">
+            <button
+              type="button"
+              className={`app-nav__link ${page === "nutrition" ? "app-nav__link--active" : ""}`}
+              onClick={goToNutrition}
+            >
+              Nutrition
+            </button>
+            <button
+              type="button"
+              className={`app-nav__link ${page === "dashboard" ? "app-nav__link--active" : ""}`}
+              onClick={goToDashboard}
+            >
+              Daily Log
+            </button>
+            <button
+              type="button"
+              className={`app-nav__link ${page === "coach" ? "app-nav__link--active" : ""}`}
+              onClick={goToCoach}
+            >
+              AI Coach
+            </button>
+            <button
+              type="button"
+              className={`app-nav__link ${page === "recommend" ? "app-nav__link--active" : ""}`}
+              onClick={goToRecommend}
+            >
+              Recommend
+            </button>
           </div>
-          <button type="button" className="ghost-button" onClick={logout}>
+          <button type="button" className="ghost-button app-nav__logout" onClick={logout}>
             Log out
           </button>
-        </div>
-        <p className="hero-copy">
-          Track your food, workouts, and daily calorie balance. This version focuses on the
-          consumed and burned flow only.
-        </p>
-      </section>
+        </nav>
 
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Selected day</p>
-            <h2>Your entries</h2>
+        <section className="hero-card wide">
+          <div className="hero-topline">
+            <div>
+              <p className="eyebrow">Daily Log</p>
+              <h1>Daily Log</h1>
+            </div>
           </div>
-          <Field
-            label="Date"
-            type="date"
-            value={day.date}
-            onChange={(event) =>
-              setDay((currentDay) => ({
-                ...currentDay,
-                date: event.target.value
-              }))
-            }
-          />
-        </div>
-
-        <div className="totals-grid">
-          <div className="stat-card">
-            <span>Consumed</span>
-            <strong>{consumedTotal}</strong>
-          </div>
-          <div className="stat-card">
-            <span>Burned</span>
-            <strong>{burnedTotal}</strong>
-          </div>
-          <div className={`stat-card ${netCalories >= 0 ? "warm" : "cool"}`}>
-            <span>Net Calories</span>
-            <strong>{netCalories}</strong>
-          </div>
-        </div>
-      </section>
-
-      <section className="manual-grid">
-        <section className="panel">
-          <p className="eyebrow">Quick totals</p>
-          <h3>Manual consumed calories</h3>
-          <Field
-            label="Consumed calories"
-            type="number"
-            min="0"
-            value={day.manualConsumedTotal}
-            onChange={(event) =>
-              setDay((currentDay) => ({
-                ...currentDay,
-                manualConsumedTotal: event.target.value
-              }))
-            }
-          />
+          <p className="hero-copy">
+            Track your food, workouts, and daily calorie balance. This version focuses on the
+            consumed and burned flow only.
+          </p>
         </section>
 
         <section className="panel">
-          <p className="eyebrow">Quick totals</p>
-          <h3>Manual burned calories</h3>
-          <Field
-            label="Burned calories"
-            type="number"
-            min="0"
-            value={day.manualBurnedTotal}
-            onChange={(event) =>
-              setDay((currentDay) => ({
-                ...currentDay,
-                manualBurnedTotal: event.target.value
-              }))
-            }
-          />
-        </section>
-
-        <section className="panel">
-          <p className="eyebrow">Prediction inputs</p>
-          <h3>Body measurements</h3>
-          <div className="measurements-grid">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Selected day</p>
+              <h2>Your entries</h2>
+            </div>
             <Field
-              label="Body weight"
-              type="number"
-              min="0"
-              value={day.bodyWeight}
+              label="Date"
+              type="date"
+              value={day.date}
               onChange={(event) =>
                 setDay((currentDay) => ({
                   ...currentDay,
-                  bodyWeight: event.target.value
-                }))
-              }
-            />
-            <Field
-              label="Height"
-              type="number"
-              min="0"
-              value={day.height}
-              onChange={(event) =>
-                setDay((currentDay) => ({
-                  ...currentDay,
-                  height: event.target.value
+                  date: event.target.value
                 }))
               }
             />
           </div>
-          <p className="status">Prediction uses your body weight and height for cardio and strength estimates.</p>
-        </section>
-      </section>
 
-      <section className="panel scan-panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">AI Food Scan</p>
-            <h3>Snap a meal, estimate before you log it</h3>
+          <div className="totals-grid">
+            <div className="stat-card">
+              <span>Burned</span>
+              <strong>{savedBurned}</strong>
+            </div>
           </div>
-        </div>
+        </section>
 
-        <div className="scan-upload">
-          <label className="field scan-file">
-            <span>Food photo</span>
-            <input type="file" accept="image/*" onChange={handleImageSelect} />
-          </label>
-          {scanImage ? (
-            <img className="scan-preview" src={scanImage} alt="Selected meal preview" />
-          ) : null}
-          <button
-            type="button"
-            className="primary-button"
-            onClick={handleAnalyzeFood}
-            disabled={!scanImage || scanLoading}
+        <section className="manual-grid">
+          <section className="panel">
+            <p className="eyebrow">Quick totals</p>
+            <h3>Manual consumed calories</h3>
+            <Field
+              label="Consumed calories"
+              type="number"
+              min="0"
+              value={day.manualConsumedTotal}
+              onChange={(event) =>
+                setDay((currentDay) => ({
+                  ...currentDay,
+                  manualConsumedTotal: event.target.value
+                }))
+              }
+            />
+          </section>
+
+          <section className="panel">
+            <p className="eyebrow">Quick totals</p>
+            <h3>Manual burned calories</h3>
+            <Field
+              label="Burned calories"
+              type="number"
+              min="0"
+              value={day.manualBurnedTotal}
+              onChange={(event) =>
+                setDay((currentDay) => ({
+                  ...currentDay,
+                  manualBurnedTotal: event.target.value
+                }))
+              }
+            />
+          </section>
+
+          <section className="panel">
+            <p className="eyebrow">Prediction inputs</p>
+            <h3>Body measurements</h3>
+            <div className="measurements-grid">
+              <Field
+                label="Body weight"
+                type="number"
+                min="0"
+                value={day.bodyWeight}
+                onChange={(event) =>
+                  setDay((currentDay) => ({
+                    ...currentDay,
+                    bodyWeight: event.target.value
+                  }))
+                }
+              />
+              <Field
+                label="Height"
+                type="number"
+                min="0"
+                value={day.height}
+                onChange={(event) =>
+                  setDay((currentDay) => ({
+                    ...currentDay,
+                    height: event.target.value
+                  }))
+                }
+              />
+            </div>
+            <p className="status">Prediction uses your body weight and height for cardio and strength estimates.</p>
+          </section>
+        </section>
+
+        <section className="panel scan-panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">AI Food Scan</p>
+              <h3>Snap a meal, estimate before you log it</h3>
+            </div>
+          </div>
+
+          <div
+            className={`drop-zone ${isDragOver ? "drop-zone--active" : ""} ${scanImage ? "drop-zone--has-image" : ""}`}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            onClick={scanImage ? undefined : handleDropZoneClick}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(event) => {
+              if (!scanImage && (event.key === "Enter" || event.key === " ")) {
+                handleDropZoneClick();
+              }
+            }}
           >
-            {scanLoading ? "Analyzing..." : "Analyze Food"}
-          </button>
-        </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleImageSelect}
+              hidden
+            />
 
-        {scanResult ? (
-          <div className="scan-result">
-            <p className="eyebrow">Detected meal</p>
-            {scanResult.foods.length > 0 ? (
-              <ul className="scan-foods">
-                {scanResult.foods.map((food, index) => (
-                  <li key={`scan-food-${index}`}>
-                    {food.name}
-                    {food.portion ? <span> · {food.portion}</span> : null}
-                  </li>
-                ))}
-              </ul>
+            {scanImage ? (
+              <img className="scan-preview" src={scanImage} alt="Selected meal preview" />
             ) : (
-              <p className="status">No food was confidently detected in this image.</p>
+              <div className="drop-zone__placeholder">
+                <svg className="drop-zone__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                  <circle cx="12" cy="13" r="4" />
+                </svg>
+                <p className="drop-zone__title">Upload a food photo</p>
+                <p className="drop-zone__hint">Click to browse or drag &amp; drop</p>
+              </div>
             )}
 
-            <div className="scan-macros">
-              <div className="macro-card">
-                <span>Calories</span>
-                <strong>
-                  {scanResult.totalCaloriesMin} - {scanResult.totalCaloriesMax}
-                </strong>
-                <small>kcal</small>
+            {scanImage ? (
+              <div className="drop-zone__overlay">
+                <button
+                  type="button"
+                  className="ghost-button drop-zone__change-btn"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    fileInputRef.current?.click();
+                  }}
+                >
+                  Change photo
+                </button>
               </div>
-              <div className="macro-card">
-                <span>Protein</span>
-                <strong>{scanResult.protein}</strong>
-                <small>g</small>
+            ) : null}
+          </div>
+
+          {scanImage ? (
+            <button
+              type="button"
+              className="primary-button"
+              onClick={handleAnalyzeFood}
+              disabled={scanLoading}
+            >
+              {scanLoading ? (
+                <span className="btn-loading">
+                  <span className="spinner" />
+                  Analyzing...
+                </span>
+              ) : (
+                "Analyze Food"
+              )}
+            </button>
+          ) : null}
+
+          {scanResult ? (
+            <div className="scan-result">
+              <div className="scan-result__header">
+                <div>
+                  <p className="eyebrow">Detected meal</p>
+                  {scanResult.foods.length > 0 ? (
+                    <ul className="scan-foods">
+                      {scanResult.foods.map((food, index) => (
+                        <li key={`scan-food-${index}`}>
+                          {food.name}
+                          {food.portion ? <span> · {food.portion}</span> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="status">No food was confidently detected in this image.</p>
+                  )}
+                </div>
+                {scanResult.estimateSource === "fallback" ? (
+                  <span className="estimate-badge estimate-badge--fallback">Fallback</span>
+                ) : (
+                  <span className="estimate-badge estimate-badge--ai">AI</span>
+                )}
               </div>
-              <div className="macro-card">
-                <span>Carbs</span>
-                <strong>{scanResult.carbs}</strong>
-                <small>g</small>
+
+              <div className="scan-macros">
+                <div className="macro-card macro-card--cal">
+                  <svg className="macro-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 20v-6M9 18l3-3 3 3" />
+                    <path d="M12 4C9.5 6.5 8 9 8 12a4 4 0 0 0 8 0c0-3-1.5-5.5-4-8z" />
+                  </svg>
+                  <span className="macro-card__label">Calories</span>
+                  <strong className="macro-card__value">
+                    {scanResult.totalCaloriesMin} - {scanResult.totalCaloriesMax}
+                  </strong>
+                  <small className="macro-card__unit">kcal</small>
+                </div>
+                <div className="macro-card macro-card--protein">
+                  <svg className="macro-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                    <path d="M20 4H6.5A2.5 2.5 0 0 0 4 6.5V20" />
+                  </svg>
+                  <span className="macro-card__label">Protein</span>
+                  <strong className="macro-card__value">{scanResult.protein}</strong>
+                  <small className="macro-card__unit">g</small>
+                </div>
+                <div className="macro-card macro-card--carbs">
+                  <svg className="macro-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                  </svg>
+                  <span className="macro-card__label">Carbs</span>
+                  <strong className="macro-card__value">{scanResult.carbs}</strong>
+                  <small className="macro-card__unit">g</small>
+                </div>
+                <div className="macro-card macro-card--fat">
+                  <svg className="macro-card__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                    <path d="M2 17l10 5 10-5" />
+                    <path d="M2 12l10 5 10-5" />
+                  </svg>
+                  <span className="macro-card__label">Fat</span>
+                  <strong className="macro-card__value">{scanResult.fat}</strong>
+                  <small className="macro-card__unit">g</small>
+                </div>
               </div>
-              <div className="macro-card">
-                <span>Fat</span>
-                <strong>{scanResult.fat}</strong>
-                <small>g</small>
+
+              <div className="scan-confirm">
+                <p className="scan-confirm__question">Did you eat this?</p>
+                <div className="scan-actions">
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={handleConsumeScan}
+                    disabled={consuming}
+                  >
+                    {consuming ? (
+                      <span className="btn-loading">
+                        <span className="spinner" />
+                        Adding...
+                      </span>
+                    ) : (
+                      "Yes, log it"
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={handleRejectScan}
+                    disabled={consuming}
+                  >
+                    No, skip
+                  </button>
+                </div>
               </div>
             </div>
+          ) : null}
 
-            <div className="scan-confirm">
-              <p>Did you eat this?</p>
-              <div className="scan-actions">
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={handleConsumeScan}
-                  disabled={consuming}
-                >
-                  {consuming ? "Adding..." : "Yes, log it"}
-                </button>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={handleRejectScan}
-                  disabled={consuming}
-                >
-                  No
-                </button>
-              </div>
+          {scanError ? <p className="status error">{scanError}</p> : null}
+          {scanMessage ? <p className="status success">{scanMessage}</p> : null}
+        </section>
+
+        <section className="panel water-panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Hydration</p>
+              <h3>Water intake</h3>
+            </div>
+            <div className="water-total">
+              <span className="water-total__value">{Number(day.manualWaterMl || 0) + sumWaterMl(day.consumedEntries)}</span>
+              <span className="water-total__sep">/</span>
+              <span className="water-total__goal">3000</span>
+              <span className="water-total__unit">ml</span>
             </div>
           </div>
-        ) : null}
 
-        {scanError ? <p className="status error">{scanError}</p> : null}
-        {scanMessage ? <p className="status success">{scanMessage}</p> : null}
-      </section>
+          <div className="water-bar-track">
+            <div
+              className="water-bar-fill"
+              style={{ width: `${Math.min(((Number(day.manualWaterMl || 0) + sumWaterMl(day.consumedEntries)) / 3000) * 100, 100)}%` }}
+            />
+          </div>
 
-      <section className="entries-grid">
-        <EntryList
-          title="Food Entries"
-          entries={day.consumedEntries}
-          onChange={(index, field, value) => updateEntry("consumed", index, field, value)}
-          onAdd={() => addEntry("consumed")}
-          onRemove={(index) => removeEntry("consumed", index)}
-        />
-        <ExerciseEntryList
-          entries={day.burnedEntries}
+          <p className="water-from-food">
+            {sumWaterMl(day.consumedEntries)} ml from food entries
+          </p>
+
+          <div className="water-quick-add">
+            <button
+              type="button"
+              className="water-btn"
+              onClick={() =>
+                setDay((prev) => ({
+                  ...prev,
+                  manualWaterMl: String(Number(prev.manualWaterMl || 0) + 250)
+                }))
+              }
+            >
+              +250 ml
+            </button>
+            <button
+              type="button"
+              className="water-btn"
+              onClick={() =>
+                setDay((prev) => ({
+                  ...prev,
+                  manualWaterMl: String(Number(prev.manualWaterMl || 0) + 500)
+                }))
+              }
+            >
+              +500 ml
+            </button>
+            <div className="water-custom-add">
+              <input
+                type="number"
+                min="0"
+                className="water-custom-input"
+                placeholder="Custom ml"
+                value={customWaterMl}
+                onChange={(e) => setCustomWaterMl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const val = Number(customWaterMl);
+                    if (val > 0) {
+                      setDay((prev) => ({
+                        ...prev,
+                        manualWaterMl: String(Number(prev.manualWaterMl || 0) + val)
+                      }));
+                      setCustomWaterMl("");
+                    }
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="water-btn water-btn--add"
+                onClick={() => {
+                  const val = Number(customWaterMl);
+                  if (val > 0) {
+                    setDay((prev) => ({
+                      ...prev,
+                      manualWaterMl: String(Number(prev.manualWaterMl || 0) + val)
+                    }));
+                    setCustomWaterMl("");
+                  }
+                }}
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section className="entries-grid">
+          <EntryList
+            title="Food Entries"
+            entries={day.consumedEntries}
+            onChange={(index, field, value) => updateEntry("consumed", index, field, value)}
+            onAdd={() => addEntry("consumed")}
+            onRemove={(index) => removeEntry("consumed", index)}
+            onAskAI={handleAskAI}
+            estimatingIndex={estimatingEntry}
+          />
+          <ExerciseEntryList
+            entries={day.burnedEntries}
+            bodyWeight={day.bodyWeight}
+            height={day.height}
+            onChange={(index, field, value, childIndex) =>
+              updateEntry("burned", index, field, value, childIndex)
+            }
+            onAdd={() => addEntry("burned")}
+            onRemove={(index) => removeEntry("burned", index)}
+            expandedIndices={expandedBurnEntries}
+            onExpand={(index) => setExpandedBurnEntries((prev) => [...prev, index])}
+          />
+        </section>
+
+        {loading ? <p className="status">Loading your saved day...</p> : null}
+        {error ? <p className="status error">{error}</p> : null}
+        {message ? <p className="status success">{message}</p> : null}
+
+        <div className="save-row">
+          <button type="button" className="primary-button" onClick={handleSaveDay} disabled={saving}>
+            {saving ? "Saving..." : "Save Day"}
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  if (page === "coach") {
+    return (
+      <main className="shell">
+        <nav className="app-nav">
+          <span className="app-nav__title">CaloriesTracker</span>
+          <div className="app-nav__links">
+            <button
+              type="button"
+              className={`app-nav__link ${page === "nutrition" ? "app-nav__link--active" : ""}`}
+              onClick={goToNutrition}
+            >
+              Nutrition
+            </button>
+            <button
+              type="button"
+              className={`app-nav__link ${page === "dashboard" ? "app-nav__link--active" : ""}`}
+              onClick={goToDashboard}
+            >
+              Daily Log
+            </button>
+            <button
+              type="button"
+              className={`app-nav__link ${page === "coach" ? "app-nav__link--active" : ""}`}
+              onClick={goToCoach}
+            >
+              AI Coach
+            </button>
+            <button
+              type="button"
+              className={`app-nav__link ${page === "recommend" ? "app-nav__link--active" : ""}`}
+              onClick={goToRecommend}
+            >
+              Recommend
+            </button>
+          </div>
+          <button type="button" className="ghost-button app-nav__logout" onClick={logout}>
+            Log out
+          </button>
+        </nav>
+        <AICoach
+          consumedEntries={day.consumedEntries}
+          burnedEntries={day.burnedEntries}
+          manualWaterMl={day.manualWaterMl}
+          manualConsumedTotal={day.manualConsumedTotal}
+          manualBurnedTotal={day.manualBurnedTotal}
+          savedConsumed={savedConsumed}
+          savedBurned={savedBurned}
+          savedWater={savedWater}
           bodyWeight={day.bodyWeight}
           height={day.height}
-          onChange={(index, field, value, childIndex) =>
-            updateEntry("burned", index, field, value, childIndex)
-          }
-          onAdd={() => addEntry("burned")}
-          onRemove={(index) => removeEntry("burned", index)}
+          userName={userName}
+          dietType={userDiet}
         />
-      </section>
+      </main>
+    );
+  }
 
-      {loading ? <p className="status">Loading your saved day...</p> : null}
-      {error ? <p className="status error">{error}</p> : null}
-      {message ? <p className="status success">{message}</p> : null}
+  if (page === "recommend") {
+    return (
+      <main className="shell">
+        <nav className="app-nav">
+          <span className="app-nav__title">CaloriesTracker</span>
+          <div className="app-nav__links">
+            <button
+              type="button"
+              className={`app-nav__link ${page === "nutrition" ? "app-nav__link--active" : ""}`}
+              onClick={goToNutrition}
+            >
+              Nutrition
+            </button>
+            <button
+              type="button"
+              className={`app-nav__link ${page === "dashboard" ? "app-nav__link--active" : ""}`}
+              onClick={goToDashboard}
+            >
+              Daily Log
+            </button>
+            <button
+              type="button"
+              className={`app-nav__link ${page === "coach" ? "app-nav__link--active" : ""}`}
+              onClick={goToCoach}
+            >
+              AI Coach
+            </button>
+            <button
+              type="button"
+              className={`app-nav__link ${page === "recommend" ? "app-nav__link--active" : ""}`}
+              onClick={goToRecommend}
+            >
+              Recommend
+            </button>
+          </div>
+          <button type="button" className="ghost-button app-nav__logout" onClick={logout}>
+            Log out
+          </button>
+        </nav>
+        <FoodRecommendation
+          token={token}
+          consumedEntries={day.consumedEntries}
+          burnedEntries={day.burnedEntries}
+          manualConsumedTotal={day.manualConsumedTotal}
+          manualBurnedTotal={day.manualBurnedTotal}
+          manualWaterMl={day.manualWaterMl}
+          dietType={userDiet}
+          onDietChange={setUserDiet}
+        />
+      </main>
+    );
+  }
 
-      <div className="save-row">
-        <button type="button" className="primary-button" onClick={handleSaveDay} disabled={saving}>
-          {saving ? "Saving..." : "Save Day"}
+  return (
+    <main className="shell">
+      <nav className="app-nav">
+        <span className="app-nav__title">CaloriesTracker</span>
+        <div className="app-nav__links">
+          <button
+            type="button"
+            className={`app-nav__link ${page === "nutrition" ? "app-nav__link--active" : ""}`}
+            onClick={goToNutrition}
+          >
+            Nutrition
+          </button>
+          <button
+            type="button"
+            className={`app-nav__link ${page === "dashboard" ? "app-nav__link--active" : ""}`}
+            onClick={goToDashboard}
+          >
+            Daily Log
+          </button>
+          <button
+            type="button"
+            className={`app-nav__link ${page === "coach" ? "app-nav__link--active" : ""}`}
+            onClick={goToCoach}
+          >
+            AI Coach
+          </button>
+          <button
+            type="button"
+            className={`app-nav__link ${page === "recommend" ? "app-nav__link--active" : ""}`}
+            onClick={goToRecommend}
+          >
+            Recommend
+          </button>
+        </div>
+        <button type="button" className="ghost-button app-nav__logout" onClick={logout}>
+          Log out
         </button>
+      </nav>
+      <div className="nutrition-page">
+        <section className="hero-card wide">
+          <p className="eyebrow">Calories Tracker</p>
+          <h1>Welcome, {userName}.</h1>
+          <p className="hero-copy">Track what you consume and burn in one secure place.</p>
+        </section>
+        <SmartNotifications analysis={analysis} />
+        <NutritionOverview entries={day.consumedEntries} loading={loading} manualWaterMl={day.manualWaterMl} />
       </div>
     </main>
   );
+
 }
 
 export default App;

@@ -5,6 +5,7 @@ import mongoose from "mongoose";
 import authRoutes from "./routes/authRoutes.js";
 import dayRoutes from "./routes/dayRoutes.js";
 import foodRoutes from "./routes/foodRoutes.js";
+import recommendRoutes from "./routes/recommendRoutes.js";
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -25,6 +26,7 @@ app.get("/health", (_request, response) => {
 app.use("/auth", authRoutes);
 app.use("/days", dayRoutes);
 app.use("/food", foodRoutes);
+app.use("/recommend", recommendRoutes);
 
 app.use((error, _request, response, _next) => {
   const status = error.status || 500;

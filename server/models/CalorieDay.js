@@ -27,6 +27,21 @@ const entrySchema = new mongoose.Schema(
       min: 0,
       default: 0
     },
+    fiber: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
+    sugar: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
+    waterMl: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
     source: {
       type: String,
       enum: ["manual", "scan"],
@@ -129,6 +144,11 @@ const calorieDaySchema = new mongoose.Schema(
       min: 0
     },
     height: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
+    manualWaterMl: {
       type: Number,
       default: 0,
       min: 0

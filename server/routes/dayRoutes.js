@@ -270,6 +270,7 @@ function normalizeDay(day, date) {
       date,
       manualConsumedTotal: 0,
       manualBurnedTotal: 0,
+      manualWaterMl: 0,
       bodyWeight: 0,
       height: 0,
       consumedEntries: [],
@@ -281,6 +282,7 @@ function normalizeDay(day, date) {
     ...day,
     bodyWeight: day.bodyWeight ?? 0,
     height: day.height ?? 0,
+    manualWaterMl: day.manualWaterMl ?? 0,
     burnedEntries: (day.burnedEntries || []).map((entry) =>
       entry.entryMode
         ? {
@@ -320,6 +322,7 @@ router.put("/:date", async (request, response, next) => {
   try {
     const manualConsumedTotal = validateNumber(request.body.manualConsumedTotal, "Manual consumed total");
     const manualBurnedTotal = validateNumber(request.body.manualBurnedTotal, "Manual burned total");
+    const manualWaterMl = validateNumber(request.body.manualWaterMl, "Manual water ml");
     const bodyWeight = validateNumber(request.body.bodyWeight, "Body weight");
     const height = validateNumber(request.body.height, "Height");
 
@@ -336,6 +339,7 @@ router.put("/:date", async (request, response, next) => {
         date: request.params.date,
         manualConsumedTotal,
         manualBurnedTotal,
+        manualWaterMl,
         bodyWeight,
         height,
         consumedEntries,

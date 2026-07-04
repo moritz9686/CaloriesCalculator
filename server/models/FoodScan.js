@@ -61,6 +61,21 @@ const foodScanSchema = new mongoose.Schema(
       default: 0,
       min: 0
     },
+    fiber: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
+    sugar: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
+    waterMl: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
     estimateSource: {
       type: String,
       enum: ["gemini", "fallback"],

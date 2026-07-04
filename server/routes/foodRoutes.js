@@ -2,7 +2,7 @@ import express from "express";
 import auth from "../middleware/auth.js";
 import CalorieDay from "../models/CalorieDay.js";
 import FoodScan from "../models/FoodScan.js";
-import { analyzeFoodImage } from "../services/foodAnalyzer.js";
+import { analyzeFoodByName, analyzeFoodImage } from "../services/foodAnalyzer.js";
 
 const router = express.Router();
 
@@ -20,6 +20,9 @@ function serializeScan(scan) {
     protein: scan.protein,
     carbs: scan.carbs,
     fat: scan.fat,
+    fiber: scan.fiber,
+    sugar: scan.sugar,
+    waterMl: scan.waterMl,
     estimateSource: scan.estimateSource,
     isConsumed: scan.isConsumed,
     consumedAt: scan.consumedAt,
@@ -28,6 +31,34 @@ function serializeScan(scan) {
 }
 
 router.use(auth);
+
+// Estimate calories/macros from a dish name (text-only, no image).
+router.post("/estimate-by-name", async (request, response, next) => {
+  try {
+    const { dishName } = request.body;
+    if (!dishName || typeof dishName !== "string" || !dishName.trim()) {
+      const error = new Error("A dish name is required.");
+      error.status = 400;
+      throw error;
+    }
+
+    const analysis = await analyzeFoodByName(dishName);
+    return response.json({
+      dishName: dishName.trim(),
+      totalCaloriesMin: analysis.totalCaloriesMin,
+      totalCaloriesMax: analysis.totalCaloriesMax,
+      protein: analysis.protein,
+      carbs: analysis.carbs,
+      fat: analysis.fat,
+      fiber: analysis.fiber,
+      sugar: analysis.sugar,
+      waterMl: analysis.waterMl,
+      estimateSource: analysis.estimateSource
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
 
 // Step 1: analyze a food image. Nothing is added to the daily intake yet.
 router.post("/analyze", async (request, response, next) => {
@@ -52,6 +83,9 @@ router.post("/analyze", async (request, response, next) => {
       protein: analysis.protein,
       carbs: analysis.carbs,
       fat: analysis.fat,
+      fiber: analysis.fiber,
+      sugar: analysis.sugar,
+      waterMl: analysis.waterMl,
       estimateSource: analysis.estimateSource,
       isConsumed: false
     });
@@ -102,6 +136,9 @@ router.post("/consume", async (request, response, next) => {
             protein: scan.protein,
             carbs: scan.carbs,
             fat: scan.fat,
+            fiber: scan.fiber,
+            sugar: scan.sugar,
+            waterMl: scan.waterMl,
             source: "scan"
           }
         }
