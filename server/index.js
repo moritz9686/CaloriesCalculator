@@ -10,11 +10,19 @@ import recommendRoutes from "./routes/recommendRoutes.js";
 const app = express();
 const port = process.env.PORT || 4000;
 const mongoUri = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/calories-calculator";
-const clientOrigin = process.env.CLIENT_ORIGIN || "http://localhost:5173";
-
 app.use(
   cors({
-    origin: clientOrigin
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      const allowed = [
+        process.env.CLIENT_ORIGIN,
+        "http://localhost:5173",
+        "http://localhost:3000"
+      ].filter(Boolean);
+      if (allowed.some((o) => origin.startsWith(o))) return callback(null, true);
+      if (/\.netlify\.app$/.test(origin)) return callback(null, true);
+      callback(null, true);
+    }
   })
 );
 app.use(express.json({ limit: "10mb" }));
