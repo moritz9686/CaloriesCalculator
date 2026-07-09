@@ -160,40 +160,6 @@ ${candidatesText}
 Recommend the single best meal from the available options above.`;
 }
 
-async function getFallbackRecommendation(candidates, remaining, mealType) {
-  const best = candidates[0];
-  if (!best) {
-    return {
-      mealName: "No suitable options available",
-      portionSize: "",
-      reason: "Try adjusting your filters or dietary preferences.",
-      protein: 0,
-      calories: 0,
-      fiber: 0,
-      foods: []
-    };
-  }
-
-  const reasons = [];
-  if (remaining.protein > 0 && best.protein >= 10) reasons.push("high in protein to help meet your daily target");
-  if (remaining.fiber > 0 && best.fiber >= 3) reasons.push("good source of fiber");
-  if (best.calories <= remaining.calories) reasons.push("fits within your remaining calorie budget");
-  if (best.prepTime <= 10) reasons.push("quick and easy to prepare");
-  if (reasons.length === 0) reasons.push("a balanced option for " + mealType);
-
-  const reason = `Recommended for ${mealType}: ${best.name} is ${reasons.join(", ")}.`;
-
-  return {
-    mealName: best.name,
-    portionSize: best.servingSize,
-    reason,
-    protein: best.protein,
-    calories: best.calories,
-    fiber: best.fiber,
-    foods: [best.name]
-  };
-}
-
 export async function recommendFoods({
   consumedEntries = [],
   burnedEntries = [],
@@ -249,34 +215,37 @@ export async function recommendFoods({
   scored.sort((a, b) => b.score - a.score);
   const candidates = scored.slice(0, 30).map(({ score, ...rest }) => rest);
 
-  let recommendation;
   const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    const error = new Error("GEMINI_API_KEY is not configured. Set it in your environment variables.");
+    error.status = 500;
+    throw error;
+  }
 
-  if (apiKey) {
-    try {
-      const prompt = buildRecommendationPrompt({
-        goal,
-        dietType,
-        mealType: mealTypeOrDefault,
-        remaining,
-        candidates
-      });
+  const prompt = buildRecommendationPrompt({
+    goal,
+    dietType,
+    mealType: mealTypeOrDefault,
+    remaining,
+    candidates
+  });
 
-      const response = await callGemini({ apiKey, prompt });
-      const payload = await response.json();
-      const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const response = await callGemini({ apiKey, prompt });
+  const payload = await response.json();
+  const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) {
+    const error = new Error("Gemini returned an empty response.");
+    error.status = 502;
+    throw error;
+  }
 
-      if (text) {
-        recommendation = JSON.parse(text);
-      } else {
-        throw new Error("Empty Gemini response");
-      }
-    } catch (err) {
-      console.warn("Gemini recommendation failed, using fallback:", err.message);
-      recommendation = await getFallbackRecommendation(candidates, remaining, mealTypeOrDefault);
-    }
-  } else {
-    recommendation = await getFallbackRecommendation(candidates, remaining, mealTypeOrDefault);
+  let recommendation;
+  try {
+    recommendation = JSON.parse(text);
+  } catch (_parseError) {
+    const error = new Error("Gemini returned malformed JSON.");
+    error.status = 502;
+    throw error;
   }
 
   return {
