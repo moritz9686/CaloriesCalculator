@@ -9,6 +9,8 @@ const GOALS = {
   sugar: 50
 };
 
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+
 function mealTypeForCurrentTime() {
   const h = new Date().getHours();
   if (h < 11) return "breakfast";
@@ -20,7 +22,6 @@ function mealTypeForCurrentTime() {
 function scoreFood(food, remaining, mealType, budget, workoutStatus) {
   let score = 0;
 
-  // Meal type match — exact match strongly preferred, "any" is filler
   if (food.mealType === mealType) {
     score += 35;
   } else if (food.mealType === "any") {
@@ -31,7 +32,6 @@ function scoreFood(food, remaining, mealType, budget, workoutStatus) {
     score -= 15;
   }
 
-  // Budget match
   if (budget === "any" || food.budget === budget) {
     score += 10;
   } else if (budget === "low" && food.budget === "medium") {
@@ -42,20 +42,15 @@ function scoreFood(food, remaining, mealType, budget, workoutStatus) {
     score -= 5;
   }
 
-  // Quick food preference (if not specified, neutral)
   if (food.quickFood) score += 3;
 
-  // Workout alignment
   if (workoutStatus === "pre" && food.preWorkout) score += 15;
   if (workoutStatus === "post" && food.postWorkout) score += 15;
 
-  // Extra protein boost when workout is selected
   if (workoutStatus !== "none") {
     score += Math.min(food.protein / 10, 1) * 20;
   }
 
-  // Nutrient gap filling — higher score for foods that fill gaps
-  // Protein bonus is halved for meal type mismatch, unless workout is selected
   let proteinMultiplier = 1;
   if (workoutStatus === "none" && food.mealType !== mealType) {
     proteinMultiplier = 0.5;
@@ -81,12 +76,10 @@ function scoreFood(food, remaining, mealType, budget, workoutStatus) {
     score += Math.min(food.fat / Math.max(remaining.fat, 1), 1) * 5;
   }
 
-  // Sugar penalty — if still have sugar budget, sweet foods are ok
   if (remaining.sugar <= 0 && food.sugar > 5) {
     score -= food.sugar * 0.5;
   }
 
-  // Calorie density penalty — penalize heavy dishes with low protein-per-calorie ratio
   const proteinPer100Cal = food.calories > 0 ? food.protein / (food.calories / 100) : 0;
   if (proteinPer100Cal < 3 && food.calories > 200) {
     score -= 12;
@@ -94,12 +87,10 @@ function scoreFood(food, remaining, mealType, budget, workoutStatus) {
     score -= 5;
   }
 
-  // High fat penalty — penalize dishes high in fat that aren't offset by high protein
   if (food.fat > 20 && food.protein < 25) {
     score -= (food.fat - 20) * 1.5;
   }
 
-  // Prep time bonus
   if (food.prepTime <= 5) score += 5;
   else if (food.prepTime <= 15) score += 3;
   else if (food.prepTime <= 30) score += 1;
@@ -107,44 +98,100 @@ function scoreFood(food, remaining, mealType, budget, workoutStatus) {
   return Math.max(score, 0);
 }
 
-function generateExplanation(food, remaining, mealType, workoutStatus) {
+function callGemini(params) {
+  const { apiKey, prompt } = params;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+
+  return fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { responseMimeType: "application/json", temperature: 0.3 }
+    })
+  });
+}
+
+const recommendationPrompt = `You are a personalized nutrition coach. Recommend the best meal for the user.
+
+Return ONLY strict JSON with this shape:
+{
+  "mealName": "string — recommended dish name",
+  "portionSize": "string — e.g. '1 bowl', '100g', '2 rotis'",
+  "reason": "string — 1-2 sentence explanation of why this is recommended",
+  "protein": number,
+  "calories": number,
+  "fiber": number,
+  "foods": ["list", "of", "key", "ingredients"]
+}
+
+Rules:
+- mealName should be specific and appetizing.
+- reason must reference the user's goal, remaining nutrients, and meal time.
+- protein/calories/fiber are for the portion specified.
+- Numbers only, no units inside the values.
+- No extra commentary outside the JSON.`;
+
+function buildRecommendationPrompt({ goal, dietType, mealType, remaining, candidates }) {
+  const candidatesText = candidates
+    .map(
+      (f, i) =>
+        `${i + 1}. ${f.name} — ${f.calories} kcal, ${f.protein}g protein, ${f.fiber}g fiber (${f.mealType}, ${f.budget} budget, ${f.prepTime} min prep)`
+    )
+    .join("\n");
+
+  return `${recommendationPrompt}
+
+User Profile:
+- Goal: ${goal}
+- Diet: ${dietType}
+- Meal Time: ${mealType}
+
+Remaining Daily Targets:
+- Calories: ${remaining.calories} kcal
+- Protein: ${remaining.protein} g
+- Fiber: ${remaining.fiber} g
+- Carbs: ${remaining.carbs} g
+- Fat: ${remaining.fat} g
+
+Available Food Options:
+${candidatesText}
+
+Recommend the single best meal from the available options above.`;
+}
+
+async function getFallbackRecommendation(candidates, remaining, mealType) {
+  const best = candidates[0];
+  if (!best) {
+    return {
+      mealName: "No suitable options available",
+      portionSize: "",
+      reason: "Try adjusting your filters or dietary preferences.",
+      protein: 0,
+      calories: 0,
+      fiber: 0,
+      foods: []
+    };
+  }
+
   const reasons = [];
+  if (remaining.protein > 0 && best.protein >= 10) reasons.push("high in protein to help meet your daily target");
+  if (remaining.fiber > 0 && best.fiber >= 3) reasons.push("good source of fiber");
+  if (best.calories <= remaining.calories) reasons.push("fits within your remaining calorie budget");
+  if (best.prepTime <= 10) reasons.push("quick and easy to prepare");
+  if (reasons.length === 0) reasons.push("a balanced option for " + mealType);
 
-  const nutrients = [];
-  if (remaining.protein > 0 && food.protein >= 10) nutrients.push("protein");
-  if (remaining.fiber > 0 && food.fiber >= 3) nutrients.push("fiber");
-  if (remaining.calories > 0 && food.calories > 100) nutrients.push("calories");
+  const reason = `Recommended for ${mealType}: ${best.name} is ${reasons.join(", ")}.`;
 
-  if (nutrients.length > 0) {
-    reasons.push(`Rich in ${nutrients.join(", ")} to meet today's targets`);
-  } else if (food.calories < 100) {
-    reasons.push("Light option — fits your remaining calorie budget");
-  }
-
-  if (food.preWorkout && workoutStatus === "pre") {
-    reasons.push("Great pre-workout fuel for sustained energy");
-  }
-  if (food.postWorkout && workoutStatus === "post") {
-    reasons.push("Ideal post-workout recovery meal");
-  }
-
-  if (food.quickFood && food.prepTime <= 10) {
-    reasons.push("Quick to prepare — ready in minutes");
-  }
-
-  if (food.mealType === mealType || food.mealType === "any") {
-    reasons.push(`Perfect ${mealType} choice`);
-  }
-
-  if (food.fiber >= 5) {
-    reasons.push("High in fiber — great for digestion and satiety");
-  }
-
-  if (reasons.length === 0) {
-    reasons.push("Balanced option that fits your daily nutrition");
-  }
-
-  return reasons.slice(0, 2).join(". ") + ".";
+  return {
+    mealName: best.name,
+    portionSize: best.servingSize,
+    reason,
+    protein: best.protein,
+    calories: best.calories,
+    fiber: best.fiber,
+    foods: [best.name]
+  };
 }
 
 export async function recommendFoods({
@@ -157,7 +204,8 @@ export async function recommendFoods({
   allergens = [],
   budget = "any",
   mealType,
-  workoutStatus = "none"
+  workoutStatus = "none",
+  goal = "maintenance"
 }) {
   const mealTypeOrDefault = mealType || mealTypeForCurrentTime();
 
@@ -186,10 +234,7 @@ export async function recommendFoods({
     sugar: Math.max(0, GOALS.sugar - sugar)
   };
 
-  // Build filter
   const filter = { dietType };
-
-  // Allergen exclusion
   if (allergens.length > 0) {
     filter.allergens = { $not: { $elemMatch: { $in: allergens } } };
   }
@@ -198,16 +243,45 @@ export async function recommendFoods({
 
   const scored = foods.map((food) => ({
     ...food,
-    score: scoreFood(food, remaining, mealTypeOrDefault, budget, workoutStatus),
-    explanation: generateExplanation(food, remaining, mealTypeOrDefault, workoutStatus)
+    score: scoreFood(food, remaining, mealTypeOrDefault, budget, workoutStatus)
   }));
 
   scored.sort((a, b) => b.score - a.score);
+  const candidates = scored.slice(0, 30).map(({ score, ...rest }) => rest);
 
-  const top5 = scored.slice(0, 5).map(({ score, ...rest }) => rest);
+  let recommendation;
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  if (apiKey) {
+    try {
+      const prompt = buildRecommendationPrompt({
+        goal,
+        dietType,
+        mealType: mealTypeOrDefault,
+        remaining,
+        candidates
+      });
+
+      const response = await callGemini({ apiKey, prompt });
+      const payload = await response.json();
+      const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      if (text) {
+        recommendation = JSON.parse(text);
+      } else {
+        throw new Error("Empty Gemini response");
+      }
+    } catch (err) {
+      console.warn("Gemini recommendation failed, using fallback:", err.message);
+      recommendation = await getFallbackRecommendation(candidates, remaining, mealTypeOrDefault);
+    }
+  } else {
+    recommendation = await getFallbackRecommendation(candidates, remaining, mealTypeOrDefault);
+  }
 
   return {
-    recommendations: top5,
+    recommendation,
+    candidates: candidates.slice(0, 5),
     remaining,
     mealType: mealTypeOrDefault,
     totalFoods: foods.length

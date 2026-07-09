@@ -18,7 +18,8 @@ router.post("/", async (request, response, next) => {
       allergens = [],
       budget = "any",
       mealType,
-      workoutStatus = "none"
+      workoutStatus = "none",
+      goal = "maintenance"
     } = request.body;
 
     const result = await recommendFoods({
@@ -31,7 +32,8 @@ router.post("/", async (request, response, next) => {
       allergens,
       budget,
       mealType,
-      workoutStatus
+      workoutStatus,
+      goal
     });
 
     return response.json(result);
